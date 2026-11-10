@@ -13,6 +13,39 @@ On Windows you can also double-click [Open Inspector.cmd](Open%20Inspector.cmd) 
 
 Select a source on the left, then a record in the timeline. **Find in records** searches the full record text, including nested fields. Use the direction selector to narrow the results. **Pretty JSON** changes the display, and **Copy payload** copies the record before display formatting. Codex JSONL records retain their original text. JSON archives are split into records and reserialized with their fields and values intact.
 
+## Walkthrough
+
+The screenshots use a synthetic Codex trace about community garden notes.
+
+1. Launch Communication Inspector and pick a **Codex trace** from **Sources**.
+
+   ![The inspector at startup with the sample trace listed under Sources](docs/screenshots/startup.png)
+
+2. Turn on **Has focus points** to keep records that contain user text or assistant replies. Hover over the **Type** heading to learn what the column shows, then hover over a value such as `inference_request` for its definition.
+
+   ![Filtered timeline with the Type heading tooltip above and the inference_request tooltip below](docs/screenshots/type-help.png)
+
+3. Select an `inference_request` row with a user text count and click **↓** beside **Wrap**. The payload pane jumps to the original prompt and highlights it.
+
+   ![The focus button highlights the garden notes prompt in the request payload](docs/screenshots/focus-text.png)
+
+4. Click **Analyze trace…** and select a model call to inspect its token usage and saved payloads. On the second call, open **Context breakdown** to compare new and repeated input with the preceding request.
+
+   ![Trace analysis with two model calls and the second call's context breakdown](docs/screenshots/trace-context.png)
+
+<details>
+<summary>Explore call payloads and tool results</summary>
+
+Select the first model call and open **Call payloads** to see the saved request, response, tool invocation, and tool result.
+
+![Call payloads for the first model call with event numbers, file references, and sizes](docs/screenshots/trace-payloads.png)
+
+Open **Tool results** and select `read_notes` to compare its emitted output with the excerpt in the next matching request.
+
+![The garden notes tool output and its excerpt in the next request shown side by side](docs/screenshots/trace-tool-results.png)
+
+</details>
+
 ## Codex sessions on this computer
 
 ### Token view
