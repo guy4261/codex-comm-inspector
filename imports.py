@@ -11,7 +11,6 @@ from zipfile import ZipFile
 from records import Record, Source
 from source_titles import (
     first_user_title,
-    project_name,
     prompt_title,
     short_title,
     source_title,
@@ -103,7 +102,6 @@ def _capture_project(fields: dict) -> str:
     return (
         short_title(fields.get("project_name"))
         or short_title(_obj(fields.get("project")).get("name"))
-        or project_name(fields.get("workspace"))
     )
 
 
@@ -119,6 +117,7 @@ def _capture_source(
         source_title(title, project=project, reference=path.name),
         f"{coverage}\n{path.absolute()}",
         load,
+        project=project,
     )
 
 

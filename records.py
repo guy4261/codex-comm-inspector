@@ -18,3 +18,4 @@ class Source:
     coverage: str
     load: Callable[[], Iterator[Record]]
     trace_path: Path | None = None
+    project: str = ""

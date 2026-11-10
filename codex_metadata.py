@@ -1,4 +1,4 @@
-"""Read the names and workspace information saved by Codex."""
+"""Read the chat titles and project assignments saved by Codex."""
 
 import json
 import re
@@ -7,7 +7,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-from source_titles import project_name, prompt_title, short_title
+from source_titles import prompt_title, short_title
 
 
 @dataclass(frozen=True)
@@ -45,12 +45,12 @@ def _desktop_projects(home):
         with (home / ".codex-global-state.json").open("rb") as stream:
             raw = stream.read(DESKTOP_STATE_LIMIT + 1)
         if len(raw) > DESKTOP_STATE_LIMIT:
-            return {}, {}
+            return {}
         state = json.loads(raw)
     except (OSError, ValueError, RecursionError):
-        return {}, {}
+        return {}
     if not isinstance(state, dict):
-        return {}, {}
+        return {}
 
     names = {}
     projects = state.get("local-projects")
@@ -67,15 +67,7 @@ def _desktop_projects(home):
             if isinstance(project, dict) and (name := short_title(project.get("name"))):
                 names[thread_id.lower()] = name
 
-    roots = state.get("thread-workspace-root-hints")
-    hints = {}
-    if isinstance(roots, dict):
-        hints = {
-            thread_id.lower(): root
-            for thread_id, root in roots.items()
-            if isinstance(root, str) and root.strip()
-        }
-    return names, hints
+    return names
 
 
 def _database_threads(home):
@@ -104,7 +96,6 @@ def _database_threads(home):
                 fields = [
                     "threads.id",
                     *title_fields,
-                    "threads.cwd" if "cwd" in threads else "NULL",
                     "projects.name" if use_projects else "NULL",
                 ]
                 query = f"SELECT {', '.join(fields)} FROM threads{join}"
@@ -113,10 +104,9 @@ def _database_threads(home):
                         short_title(name)
                         or prompt_title(title)
                         or prompt_title(first_message),
-                        cwd or "",
                         short_title(project),
                     )
-                    for thread_id, name, title, first_message, cwd, project in db.execute(
+                    for thread_id, name, title, first_message, project in db.execute(
                         query
                     )
                     if isinstance(thread_id, str)
@@ -129,21 +119,17 @@ def _database_threads(home):
 def read_thread_labels(home: Path) -> dict[str, ThreadLabel]:
     """Collect thread titles and projects without opening rollout files."""
     indexed = _index_titles(home)
-    desktop_projects, workspace_hints = _desktop_projects(home)
+    desktop_projects = _desktop_projects(home)
     database = _database_threads(home)
     labels = {}
     for thread_id in (
         indexed.keys()
         | desktop_projects.keys()
-        | workspace_hints.keys()
         | database.keys()
     ):
-        title, cwd, project = database.get(thread_id, ("", "", ""))
+        title, project = database.get(thread_id, ("", ""))
         labels[thread_id] = ThreadLabel(
             indexed.get(thread_id) or title,
-            desktop_projects.get(thread_id)
-            or project
-            or project_name(workspace_hints.get(thread_id))
-            or project_name(cwd),
+            desktop_projects.get(thread_id) or project,
         )
     return labels

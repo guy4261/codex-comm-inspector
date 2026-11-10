@@ -9,7 +9,7 @@ from pathlib import Path
 
 from codex_metadata import ThreadLabel, read_thread_labels
 from records import Record, Source
-from source_titles import project_name, prompt_title, short_title, source_title
+from source_titles import prompt_title, short_title, source_title
 
 ROLLOUT_COVERAGE = (
     "Codex persisted history. Inspect any prompts, injected messages, tool activity, "
@@ -71,6 +71,7 @@ def _labeled_source(path, label):
         ),
         coverage=f"{ROLLOUT_COVERAGE}\n{path}",
         load=lambda: _read_rollout(path),
+        project=label.project,
     )
 
 
@@ -110,14 +111,14 @@ def _rollout_title(path, labels):
     thread_id = match[1].casefold() if match else ""
     indexed = labels.get(thread_id, ThreadLabel())
     title, project = indexed.title, indexed.project
-    if title and project:
+    if title:
         return thread_id, indexed
 
     remaining = TITLE_SCAN_BYTES
     try:
         with _open_rollout(path) as stream:
             for _ in range(TITLE_SCAN_LINES):
-                if not remaining or (title and project):
+                if not remaining or title:
                     break
                 line = stream.readline(remaining)
                 if not line:
@@ -143,8 +144,6 @@ def _rollout_title(path, labels):
                             title = saved.title or title
                             project = saved.project or project
                     title = title or short_title(payload.get("title"))
-                if kind in ("session_meta", "turn_context"):
-                    project = project or project_name(payload.get("cwd"))
                 title = title or _opening_prompt(kind, payload)
     except (EOFError, OSError, RuntimeError):
         pass

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from records import Record, Source
-from source_titles import first_user_title, project_name, prompt_title, source_title
+from source_titles import first_user_title, prompt_title, source_title
 
 TRACE_COVERAGE = (
     "Experimental local Codex trace. Shows recorded model request snapshots, response data, "
@@ -43,11 +43,13 @@ def trace_source(path: Path, thread_labels=None) -> Source:
     if path.name not in {"manifest.json", "trace.jsonl"}:
         raise ValueError("Select a Codex trace folder's manifest.json or trace.jsonl.")
     root = path.parent.resolve()
+    title, project = _trace_label(root, thread_labels or {})
     return Source(
-        title=_trace_title(root, thread_labels or {}),
+        title=source_title(title, project=project, reference=f"Codex trace · {root.name}"),
         coverage=f"{TRACE_COVERAGE}\n{root}",
         load=lambda: _read_trace(root),
         trace_path=root / "trace.jsonl",
+        project=project,
     )
 
 
@@ -121,15 +123,12 @@ def _startup_metadata(root: Path, reference) -> dict:
         return {}
 
 
-def _trace_details(root, startup, thread_id, title, project):
+def _trace_prompt_title(root, startup, thread_id):
     for event in startup:
         payload = event["payload"]
         if _thread_key(event.get("thread_id") or payload.get("thread_id")) != thread_id:
             continue
-        if not project and payload.get("type") == "thread_started":
-            metadata = _startup_metadata(root, payload.get("metadata_payload"))
-            project = project_name(metadata.get("cwd"))
-        elif not title and payload.get("type") == "inference_started":
+        if payload.get("type") == "inference_started":
             request = _startup_metadata(root, payload.get("request_payload"))
             content = request.get("input")
             title = (
@@ -137,21 +136,20 @@ def _trace_details(root, startup, thread_id, title, project):
                 if isinstance(content, str)
                 else first_user_title(content)
             )
-        if title and project:
-            break
-    return title, project
+            if title:
+                return title
+    return ""
 
 
-def _trace_title(root: Path, thread_labels) -> str:
+def _trace_label(root: Path, thread_labels) -> tuple[str, str]:
     try:
         manifest = _title_metadata(_trace_path(root, "manifest.json"))
     except (OSError, RuntimeError, ValueError):
         manifest = {}
     thread_id = _thread_key(manifest.get("root_thread_id"))
     label = thread_labels.get(thread_id)
-    reference = f"Codex trace · {root.name}"
-    if label and label.title and label.project:
-        return source_title(label.title, project=label.project, reference=reference)
+    if label and label.title:
+        return label.title, label.project
 
     startup = _startup_events(root)
     if not thread_id:
@@ -166,9 +164,9 @@ def _trace_title(root: Path, thread_labels) -> str:
         thread_id = _thread_key(start.get("root_thread_id"))
         label = thread_labels.get(thread_id)
     title, project = (label.title, label.project) if label else ("", "")
-    if thread_id:
-        title, project = _trace_details(root, startup, thread_id, title, project)
-    return source_title(title, project=project, reference=reference)
+    if thread_id and not title:
+        title = _trace_prompt_title(root, startup, thread_id)
+    return title, project
 
 
 def _timestamp(value) -> str:
