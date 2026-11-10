@@ -1,5 +1,9 @@
 # Communication Inspector
 
+**Skip the slop: [`HUMAN.md`](HUMAN.md)**
+
+A tool for inspecting the communication traces between your Codex GUI app and the models.
+
 Use Python 3.14 or newer with Tkinter. Python 3.14 provides the Zstandard reader needed for compressed Codex logs. Run `python -m tkinter` to check that your Python installation has Tkinter. If it is missing, install Tk support through your Python installer or operating system package manager.
 
 From this directory, run:
