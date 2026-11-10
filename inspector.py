@@ -7,8 +7,9 @@ import re
 import threading
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 
 from codex_metadata import read_thread_labels
 from codex_records import codex_home, codex_source, list_codex
@@ -20,6 +21,7 @@ from token_counts import tokenizer
 from trace_view import TraceView
 
 COLUMNS = (
+    ("index", "#", 65),
     ("time", "Time", 185),
     ("direction", "Direction", 85),
     ("kind", "Type", 190),
@@ -33,6 +35,16 @@ COLUMNS = (
 )
 TOKEN_COLORS = ("#dcecff", "#fce1ef", "#e5f2d5", "#eee4fb", "#ffebd0")
 NUMERIC_COLUMNS = {"focus_points", "user_texts", "replies", "tokens", "usage", "cached"}
+
+
+def timestamp_key(record):
+    try:
+        timestamp = datetime.fromisoformat(record.timestamp)
+    except ValueError:
+        return (1, record.timestamp)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return (0, timestamp)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,11 +103,14 @@ def record_stats(record):
 
 
 JSON_STRING = re.compile(r'"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+"')
+DISPLAY_STRING = re.compile(JSON_STRING.pattern.replace(r"\x00-\x1f", r"\x00-\x09\x0b-\x1f"))
+FIELD_SEPARATOR = re.compile(r"\s*:")
+NEWLINE_ESCAPE = re.compile(r"\\(?:\\|n)")
 OBJECT_VALUE = re.compile(r"\s*:\s*\{")
 
 
 def expand_json_objects(value, expanded_keys=None, *, field=False):
-    """Expand objects in freshly parsed JSON in place and report whether anything changed."""
+    """Expand JSON objects in place and detect multiline string values."""
     changed = False
     if isinstance(value, str) and value.lstrip().startswith("{"):
         try:
@@ -118,12 +133,25 @@ def expand_json_objects(value, expanded_keys=None, *, field=False):
         for index, child in enumerate(value):
             value[index], child_changed = expand_json_objects(child, expanded_keys)
             changed |= child_changed
+    elif isinstance(value, str):
+        changed = "\n" in value
     return value, changed
 
 
 def pretty_json(document):
     rendered = json.dumps(document, ensure_ascii=False, indent=2)
     return rendered.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
+def show_value_newlines(rendered):
+    def render_string(match):
+        if FIELD_SEPARATOR.match(rendered, match.end()):
+            return match[0]
+        return NEWLINE_ESCAPE.sub(
+            lambda escape: "\n" if escape[0] == r"\n" else escape[0], match[0]
+        )
+
+    return JSON_STRING.sub(render_string, rendered)
 
 
 def collect_focus_text(value, texts):
@@ -189,7 +217,7 @@ def focus_highlights(document):
 def focus_tags(match, highlights):
     if not highlights:
         return ()
-    text = json.loads(match[0])
+    text = json.loads(match[0], strict=False)
     return tuple(tag for tag, texts in highlights.items() if text in texts)
 
 
@@ -218,8 +246,12 @@ class Inspector:
         ).expanduser()
         self.local_sources: list[Source] = []
         self.imported_sources: list[Source] = []
-        self.visible_sources: list[Source] = []
+        self.source_rows: dict[str, Source] = {}
+        self.project_rows: dict[str, str] = {}
+        self.project_open: dict[str, bool] = {}
         self.records: list[Record] = []
+        self.record_indices = {}
+        self.loading_records = False
         self.record_stats: list[RecordStats] = []
         self.show_tokens = False
         self.active_record_id = ""
@@ -249,8 +281,8 @@ class Inspector:
 
     def build_ui(self):
         self.root.title("Communication Inspector")
-        self.root.geometry("1250x800")
         self.root.minsize(770, 520)
+        self.restore_window()
 
         header = ttk.Frame(self.root, padding=(12, 9))
         header.pack(fill="x")
@@ -284,12 +316,17 @@ class Inspector:
         source_filter = ttk.Entry(sources, textvariable=self.source_query)
         explain(source_filter, "inspector.source_filter").pack(fill="x", pady=4)
         self.source_query.trace_add("write", lambda *_: self.show_sources())
-        self.sources = tk.Listbox(
-            sources, width=36, exportselection=False, activestyle="none"
+        self.sources = ttk.Treeview(
+            sources, show="tree", selectmode="browse", style="Sources.Treeview"
         )
+        self.sources.column("#0", width=320)
+        self.configure_source_tree()
         explain(self.sources, "inspector.sources")
         self.scrollable(sources, self.sources)
-        self.sources.bind("<<ListboxSelect>>", self.choose_source)
+        self.sources.bind("<<TreeviewSelect>>", self.choose_source)
+        self.sources.bind("<Button-1>", self.toggle_source_project)
+        for event in ("<<TreeviewOpen>>", "<<TreeviewClose>>"):
+            self.sources.bind(event, self.source_project_changed)
 
         scope_bar = ttk.Frame(details)
         scope_bar.pack(fill="x", pady=(0, 8))
@@ -348,6 +385,10 @@ class Inspector:
         split.add(events, weight=2)
         split.add(raw, weight=3)
 
+        self.records_loading = ttk.Frame(events)
+        ttk.Label(self.records_loading, text="Loading records…").pack(side="left", padx=(0, 8))
+        self.records_progress = ttk.Progressbar(self.records_loading, mode="indeterminate")
+        self.records_progress.pack(side="left")
         columns = tuple(field for field, _, _ in COLUMNS)
         self.events = ttk.Treeview(
             events, columns=columns, show="headings", height=9, selectmode="extended"
@@ -424,9 +465,49 @@ class Inspector:
             ),
         ).pack(side="left", padx=4)
 
-        self.detail = tk.Text(
-            raw, wrap="word", font=("Consolas", 10), state="disabled", undo=False
+        search = ttk.Frame(raw)
+        search.pack(fill="x", pady=(0, 4))
+        self.payload_query = tk.StringVar()
+        self.payload_case = tk.BooleanVar()
+        self.payload_regex = tk.BooleanVar()
+        ttk.Label(search, text="Find").pack(side="left", padx=(0, 4))
+        self.payload_find = ttk.Entry(search, textvariable=self.payload_query, width=24)
+        self.payload_find.pack(side="left", fill="x", expand=True)
+        for label, direction in (("Previous", -1), ("Next", 1)):
+            ttk.Button(
+                search, text=label,
+                command=lambda step=direction: self.move_payload_match(step),
+            ).pack(side="left", padx=(4, 0))
+        for label, option in (("Match case", self.payload_case), ("Regex", self.payload_regex)):
+            ttk.Checkbutton(
+                search, text=label, variable=option, command=self.refresh_payload_search
+            ).pack(side="left", padx=(4, 0))
+        self.payload_find_status = ttk.Label(raw)
+        self.payload_find_status.pack(fill="x")
+        self.payload_find.bind("<Return>", lambda _: self.move_payload_match(1))
+        self.payload_find.bind("<Shift-Return>", lambda _: self.move_payload_match(-1))
+        self.payload_query.trace_add("write", lambda *_: self.refresh_payload_search())
+
+        payload = ttk.Frame(raw)
+        payload.pack(fill="both", expand=True)
+        self.detail_font = font.Font(family="Consolas", size=10)
+        self.detail_gutter = tk.Canvas(
+            payload, width=24, background="#f0f0f0", highlightthickness=0, takefocus=False
         )
+        self.detail = tk.Text(
+            payload, wrap="word", font=self.detail_font, undo=False
+        )
+        # Keep Tk's caret and selection bindings active while blocking text edits.
+        widget = str(self.detail)
+        self.detail_writer = f"{widget}_writer"
+        tkapp = self.detail.tk
+        tkapp.call("rename", widget, self.detail_writer)
+        tkapp.call("proc", widget, ("command", "args"), f"""
+            if {{$command in {{insert delete replace}}}} {{ return }}
+            tailcall {self.detail_writer} $command {{*}}$args
+        """)
+        tkapp.call("trace", "add", "command", self.detail_writer, "delete",
+                   ("apply", ("args", f"rename {widget} {{}}")))
         self.detail.tag_configure("user_text", foreground="#b00020")
         self.detail.tag_configure("reply_text", foreground="#006629")
         self.detail.tag_configure("expanded_key", foreground="#6740a4")
@@ -434,10 +515,48 @@ class Inspector:
         for index, color in enumerate(TOKEN_COLORS):
             self.detail.tag_configure(f"token_{index}", background=color)
         self.detail.tag_configure("focused_text", background="#ffe58a")
+        self.payload_matches = []
+        self.payload_match_index = -1
+        self.detail.tag_configure("payload_match", background="#ffbd66")
+        self.detail.bind("<Control-f>", self.focus_payload_search)
         explain(self.detail, "inspector.payload")
-        self.scrollable(raw, self.detail)
+        payload_horizontal = ttk.Scrollbar(payload, orient="horizontal", command=self.detail.xview)
+        self.detail.configure(xscrollcommand=payload_horizontal.set)
+        payload_horizontal.pack(side="bottom", fill="x")
+        self.detail_gutter.pack(side="left", fill="y")
+        payload_scroll = ttk.Scrollbar(payload, orient="vertical", command=self.detail.yview)
+        payload_scroll.pack(side="right", fill="y")
+        self.detail.pack(fill="both", expand=True)
+
+        def scroll_payload(first, last):
+            payload_scroll.set(first, last)
+            self.detail.after_idle(self.draw_payload_lines)
+
+        self.detail.configure(yscrollcommand=scroll_payload)
+        self.detail.bind("<Configure>", lambda _: self.detail.after_idle(self.draw_payload_lines))
         status = ttk.Label(self.root, textvariable=self.status, padding=(12, 0, 12, 8))
         explain(status, "inspector.status").pack(fill="x")
+
+    def draw_payload_lines(self):
+        gutter = self.detail_gutter
+        gutter.delete("all")
+        if self.detail.compare("end-1c", "==", "1.0"):
+            return
+        last_line = int(self.detail.index("end-1c").split(".")[0])
+        width = self.detail_font.measure(str(last_line)) + 12
+        if int(gutter.cget("width")) != width:
+            gutter.configure(width=width)
+        first_visible = int(self.detail.index("@0,0").split(".")[0])
+        bottom = self.detail.winfo_height() - 1
+        last_visible = int(self.detail.index(f"@0,{bottom}").split(".")[0])
+        for line in range(first_visible, last_visible + 1):
+            info = self.detail.dlineinfo(f"{line}.0")
+            if info is not None:
+                _, y, _, height, _ = info
+                gutter.create_text(
+                    width - 6, y + height / 2, text=str(line), anchor="e",
+                    font=self.detail_font, fill="#666666",
+                )
 
     @staticmethod
     def scrollable(frame, widget):
@@ -564,6 +683,11 @@ class Inspector:
                 if sources:
                     self.source_query.set("")
                     self.activate(sources[0])
+                    selection = self.sources.selection()
+                    if selection:
+                        row = selection[0]
+                        self.sources.see(row)
+                        self.update_source_indicator(self.sources.parent(row))
                 self.status.set(
                     " | ".join([f"Imported {len(sources):,} source(s)", *errors])
                 )
@@ -578,37 +702,108 @@ class Inspector:
                     view, call_id = token
                     view.show_context(call_id, result, error)
             elif token == self.request:
+                self.loading_records = False
+                self.records_progress.stop()
+                self.records_loading.place_forget()
                 if error:
                     self.status.set(f"Couldn't read this source. {error}")
                     continue
-                self.records, self.record_stats = result
+                self.records, self.record_stats, self.record_indices = result
                 self.show_records()
         self.root.after(50, self.poll)
 
+    def configure_source_tree(self):
+        collapsed, expanded, leaf = [
+            tk.PhotoImage(master=self.root, width=15, height=11) for _ in range(3)
+        ]
+        for icon in (collapsed, expanded):
+            icon.put("#555555", to=(2, 5, 9, 6))
+        collapsed.put("#555555", to=(5, 2, 6, 9))
+        self.source_indicators = {False: collapsed, True: expanded}
+        self.source_leaf = leaf
+        style = ttk.Style(self.root)
+        line_height = font.nametofont("TkDefaultFont", root=self.root).metrics("linespace")
+        style.configure("Sources.Treeview", rowheight=max(24, line_height + 6))
+        style.layout(
+            "Sources.Treeview.Item",
+            [
+                (
+                    "Treeitem.padding",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            ("Treeitem.image", {"side": "left", "sticky": ""}),
+                            ("Treeitem.text", {"side": "left", "sticky": ""}),
+                        ],
+                    },
+                ),
+            ],
+        )
+
+    def update_source_indicator(self, row):
+        if row and self.sources.exists(row) and self.sources.get_children(row):
+            is_open = self.sources.item(row, "open")
+            self.sources.item(row, image=self.source_indicators[is_open])
+
+    def source_project_changed(self, _event):
+        # Tk sends TreeviewOpen before updating the item's open flag.
+        self.root.after_idle(self.update_source_indicator, self.sources.focus())
+
+    def toggle_source_project(self, event):
+        row = self.sources.identify_row(event.y)
+        if (
+            row
+            and self.sources.get_children(row)
+            and self.sources.identify_element(event.x, event.y) == "image"
+        ):
+            self.sources.focus_set()
+            self.sources.focus(row)
+            self.sources.item(row, open=not self.sources.item(row, "open"))
+            self.update_source_indicator(row)
+            return "break"
+
     def show_sources(self):
         query = self.source_query.get().strip().casefold()
-        self.visible_sources = [
-            source
-            for source in [*self.imported_sources, *self.local_sources]
-            if query in source.title.casefold()
-        ]
-        self.sources.delete(0, "end")
-        for source in self.visible_sources:
-            self.sources.insert("end", source.title)
+        for project, row in self.project_rows.items():
+            self.project_open[project] = self.sources.item(row, "open")
+        self.sources.delete(*self.sources.get_children())
+        self.project_rows.clear()
+        self.source_rows.clear()
+
+        groups: dict[str, list[Source]] = {}
+        for source in [*self.imported_sources, *self.local_sources]:
+            if query in source.title.casefold():
+                groups.setdefault(source.project, []).append(source)
+        standalone = groups.pop("", [])
+        for project, sources in groups.items():
+            row = self.sources.insert(
+                "", "end", text=project, open=self.project_open.get(project, True)
+            )
+            self.project_rows[project] = row
+            for source in sources:
+                title = source.title.removeprefix(f"{project} · ")
+                self.source_rows[self.sources.insert(row, "end", text=title)] = source
+            self.update_source_indicator(row)
+        for source in standalone:
+            row = self.sources.insert("", "end", text=source.title, image=self.source_leaf)
+            self.source_rows[row] = source
         self.highlight_source()
 
     def highlight_source(self):
-        self.sources.selection_clear(0, "end")
-        if self.current_source in self.visible_sources:
-            index = self.visible_sources.index(self.current_source)
-            self.sources.selection_set(index)
-            self.sources.see(index)
+        self.sources.selection_remove(*self.sources.selection())
+        for row, source in self.source_rows.items():
+            if source == self.current_source:
+                self.sources.selection_set(row)
+                parent = self.sources.parent(row)
+                if not parent or self.sources.item(parent, "open"):
+                    self.sources.see(row)
+                break
 
     def choose_source(self, _event):
-        selection = self.sources.curselection()
+        selection = self.sources.selection()
         if selection:
-            source = self.visible_sources[selection[0]]
-            if source is not self.current_source:
+            source = self.source_rows.get(selection[0])
+            if source is not None and source is not self.current_source:
                 self.activate(source)
 
     def activate(self, source):
@@ -617,6 +812,11 @@ class Inspector:
         self.request += 1
         self.records = []
         self.record_stats = []
+        self.record_indices = {}
+        self.loading_records = True
+        self.records_loading.place(relx=0.5, rely=0.5, anchor="center")
+        self.records_loading.lift()
+        self.records_progress.start()
         self.coverage.set(source.coverage)
         self.trace_button.state(["!disabled" if source.trace_path else "disabled"])
         self.active_record_id = ""
@@ -625,7 +825,9 @@ class Inspector:
 
         def read():
             records = list(source.load())
-            return records, [record_stats(record) for record in records]
+            chronological = sorted(range(len(records)), key=lambda index: timestamp_key(records[index]))
+            indices = {index: rank for rank, index in enumerate(chronological, 1)}
+            return records, [record_stats(record) for record in records], indices
 
         self.work("records", self.request, read)
 
@@ -701,7 +903,9 @@ class Inspector:
         rows = list(enumerate(self.records))
         if self.sort_column:
             field = {"time": "timestamp"}.get(self.sort_column, self.sort_column)
-            if field in NUMERIC_COLUMNS:
+            if field == "index":
+                rows.sort(key=lambda row: self.record_indices[row[0]], reverse=self.sort_reverse)
+            elif field in NUMERIC_COLUMNS:
 
                 def sort_value(row):
                     value = getattr(self.record_stats[row[0]], field)
@@ -732,6 +936,7 @@ class Inspector:
                 "end",
                 iid=str(index),
                 values=(
+                    self.record_indices[index],
                     record.timestamp,
                     record.direction,
                     record.kind,
@@ -760,7 +965,8 @@ class Inspector:
             self.events.selection_set(item)
             self.events.focus(item)
         self.show_detail()
-        self.status.set(f"{count:,} of {len(self.records):,} records")
+        if not self.loading_records:
+            self.status.set(f"{count:,} of {len(self.records):,} records")
 
     def remember_clicked_record(self, event):
         item = self.events.identify_row(event.y)
@@ -825,8 +1031,7 @@ class Inspector:
                 else "inspector.drilldown.no_record"
             )
 
-        self.detail.configure(state="normal")
-        self.detail.delete("1.0", "end")
+        self.detail.tk.call(self.detail_writer, "delete", "1.0", "end")
         value = record.raw if record else ""
         highlights = {}
         expanded_keys = None
@@ -839,7 +1044,7 @@ class Inspector:
                     value = pretty_json(document)
                 show_expanded = self.drilldown.get()
                 if new_record or show_expanded:
-                    keys = [] if show_expanded else None
+                    keys = []
                     document, changed = expand_json_objects(document, keys)
                     if new_record:
                         self.drilldown_help = (
@@ -849,8 +1054,9 @@ class Inspector:
                         )
                         if changed:
                             self.drilldown_button.state(["!disabled"])
-                    elif changed:
-                        rendered = pretty_json(document)
+                            self.drilldown.set(True)
+                    if changed:
+                        rendered = show_value_newlines(pretty_json(document))
                         original_view = value if self.show_tokens else None
                         value = rendered
                         expanded_keys = iter(keys)
@@ -862,7 +1068,8 @@ class Inspector:
                 self.drilldown_help = "inspector.drilldown.too_deep"
             finally:
                 document = None
-        self.detail.insert("1.0", value)
+        self.detail.tk.call(self.detail_writer, "insert", "1.0", value)
+        self.detail.mark_set("insert", "1.0")
         self.token_status.configure(text="")
         if record and self.show_tokens:
             self.color_tokens(
@@ -870,7 +1077,7 @@ class Inspector:
             )
         self.focus_index = 0
         if expanded_keys is not None or highlights:
-            for match in JSON_STRING.finditer(value):
+            for match in DISPLAY_STRING.finditer(value):
                 start = f"1.0 + {match.start() + 1} chars"
                 end = f"1.0 + {match.end() - 1} chars"
                 if expanded_keys is not None and OBJECT_VALUE.match(value, match.end()):
@@ -880,10 +1087,54 @@ class Inspector:
                     for tag in tags:
                         self.detail.tag_add(tag, start, end)
                     self.detail.tag_add("focus_target", start, end)
-        self.detail.configure(state="disabled")
+        self.refresh_payload_search(value)
+        self.detail.after_idle(self.draw_payload_lines)
         self.focus_button.state(
             ["!disabled" if self.detail.tag_ranges("focus_target") else "disabled"]
         )
+
+    def focus_payload_search(self, _event):
+        self.payload_find.focus_set()
+        self.payload_find.selection_range(0, "end")
+        return "break"
+
+    def refresh_payload_search(self, value=None):
+        self.detail.tag_remove("payload_match", "1.0", "end")
+        self.payload_matches = []
+        self.payload_match_index = -1
+        self.payload_find_status.configure(text="")
+        query = self.payload_query.get()
+        if not query:
+            return
+        pattern = query if self.payload_regex.get() else re.escape(query)
+        flags = 0 if self.payload_case.get() else re.IGNORECASE
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error as error:
+            self.payload_find_status.configure(text=f"Invalid regex: {error}")
+            return
+        if value is None:
+            value = self.detail.get("1.0", "end-1c")
+        self.payload_matches = [match.span() for match in regex.finditer(value)]
+        if self.payload_matches:
+            self.move_payload_match(1)
+        else:
+            self.payload_find_status.configure(text="No matches")
+
+    def move_payload_match(self, step):
+        count = len(self.payload_matches)
+        if count:
+            self.payload_match_index = (self.payload_match_index + step) % count
+            start, end = self.payload_matches[self.payload_match_index]
+            first = f"1.0 + {start} chars"
+            last = f"1.0 + {end} chars"
+            self.detail.tag_remove("payload_match", "1.0", "end")
+            self.detail.tag_add("payload_match", first, last)
+            self.detail.see(first)
+            self.payload_find_status.configure(
+                text=f"Match {self.payload_match_index + 1:,} of {count:,}"
+            )
+        return "break"
 
     def toggle_tokens(self):
         self.show_tokens = not self.show_tokens
@@ -941,6 +1192,51 @@ class Inspector:
             self.root.clipboard_clear()
             self.root.clipboard_append(record.raw)
             self.status.set("Copied the record payload to the clipboard")
+
+
+    def restore_window(self):
+        settings_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+        self.window_settings = settings_dir / "Communication Inspector" / "window.json"
+        geometry = "1250x800"
+        state = "zoomed"
+        try:
+            saved = json.loads(self.window_settings.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                saved_geometry = saved.get("geometry")
+                if isinstance(saved_geometry, str) and re.fullmatch(
+                    r"[1-9]\d*x[1-9]\d*[+-]-?\d+[+-]-?\d+", saved_geometry
+                ):
+                    geometry = saved_geometry
+                    if saved.get("state") == "normal":
+                        state = "normal"
+        except (OSError, ValueError):
+            pass
+
+        self.root.geometry(geometry)
+        self.root.state(state)
+        self.window_layout = {"state": state, "geometry": geometry}
+        self.root.bind("<Configure>", self.remember_window, add="+")
+        self.root.protocol("WM_DELETE_WINDOW", self.close_window)
+
+    def remember_window(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        state = self.root.state()
+        if state in ("normal", "zoomed"):
+            self.window_layout["state"] = state
+            if state == "normal":
+                self.window_layout["geometry"] = self.root.geometry()
+
+    def close_window(self):
+        self.remember_window()
+        try:
+            self.window_settings.parent.mkdir(parents=True, exist_ok=True)
+            self.window_settings.write_text(
+                json.dumps(self.window_layout), encoding="utf-8"
+            )
+        except OSError:
+            pass
+        self.root.destroy()
 
 
 if __name__ == "__main__":
