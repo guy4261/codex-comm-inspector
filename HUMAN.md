@@ -34,8 +34,8 @@ In the meanwhile, enjoy this tool or have your agent read this repo and make you
 
 Or try [`claude-tap`](https://liaohch3.com/claude-tap/), which I found only after vibing this tool to existence and then suddenly thinking about searching for something already in existence. Human after all!
 
-<a name="appendix-1"></a>
 
+<a name="appendix-1"></a>
 ### Appendix 1: What's In the Request?
 
 I actually asked Codex to analyze the trace and tell me what was there and why - this is the answer I got. Numbers are estimations.
@@ -66,3 +66,12 @@ Also, sorry for putting non-human text in `HUMAN.md`! Here's what Codex had to s
 | **Total** | | **25,379 (100%)** | | **22,080–22,230** |
 
 The biggest lever is **whether Codex loads tools before it knows it needs them**. The tool catalog alone accounts for just over half the estimated savings. These are payload estimates. The trace reports 27,064 input tokens, of which 20,736 were cached, so an 87% smaller request wouldn’t necessarily mean an 87% lower bill.
+
+
+
+### Appendix 2: Is this already solved?
+
+* Session viewer (works with Codex too, despite the name): https://liaohch3.com/claude-tap/
+* Context minimizer plugin: https://github.com/mksglu/context-mode
+
+I found out these two after this repo was already created; I'll dig deeper into them to know whether I should kill this project or let it be..
