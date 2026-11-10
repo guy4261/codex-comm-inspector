@@ -34,23 +34,24 @@ Or try [`claude-tap`](https://liaohch3.com/claude-tap/), which I found only afte
 
 ### Appendix 1: What's In the Request?
 
-I actually asked Codex to analyze the trace and tell me what was there and why - this is the answer I got.
+I actually asked Codex to analyze the trace and tell me what was there and why - this is the answer I got. Numbers are estimations.
 
 Also, sorry for putting non-human text in `HUMAN.md`!
 
-| Name | What was sent | Useful or necessary for this answer? |
-|---|---|---|
-| Tool definitions | 14 tool schemas across four namespaces, including an executor with embedded docs for web search, shell commands, and image generation. Also includes timing, subagent, and computer-use tools. | Web search could verify current details or resolve uncertainty. Stable, high-level definitions didn’t inherently require it. The other tools had no clear use. |
-| Base Codex instructions | Writing style, formatting, progress updates, approval rules, coding conventions, and workflows. | Style guidance could affect phrasing. Your prompt already specified the length and tone. |
-| Desktop app instructions | Rules for media, files, worktrees, automations, chat management, and app-specific formatting. | No clear use for a plain-text answer. |
-| Skills, connectors, and plugins | A catalog of installed skills, deferred tool namespaces, and recommended uninstalled plugins. | No clear use. The catalog supplied no subject-matter information. |
-| Permissions and collaboration | Filesystem and network permissions, approval policy, Default mode, agent roles, and a rule disabling proactive delegation. | Relevant to what Codex could do, unnecessary for the definitions. |
-| Workspace instructions and environment | Your `@@@` protected-section rule, working directory, PowerShell shell, workspace roots, and permission profile. | Unnecessary. The prompt didn’t involve files or commands. |
-| Client date and time zone | The client date and `Asia/Jerusalem`, with instructions to use them for user-facing dates and schedules. | Unnecessary for the question as asked. |
-| Open and selected Page context | Two Page snapshots plus instructions for interpreting them. Both Page IDs were null, and there was no selected document view. | No Page content was available to use. |
-| Model and verbosity | `model: gpt-6.1-sol` and `text.verbosity: low`. | The model field selects what runs. Low verbosity reinforces “be terse.” Neither supplies facts. |
-| Reasoning settings | The top-level request specifies `xhigh` effort, a `detailed` summary, and `all_turns` context. An appended configuration update specifies `low` effort. | Could affect how the request was processed. The trace shows both effort values and doesn’t establish which took effect. |
-| Tool-use settings | `tool_choice: auto` and `parallel_tool_calls: false`. | Control whether and how tools can be called. No calls or results appear in the captured input. |
-| Request and response controls | `response.create`, streaming on, `store: false`, reasoning-summary delivery options, and requests for encrypted reasoning and output fields. | Handle request execution and response delivery. No relevance to the definitions. |
-| Cache, client, and message metadata | A prompt-cache key, app and turn identifiers, timestamps, client flags, and per-message role and provenance fields. | Operational bookkeeping. Message roles distinguish your prompt from app instructions, but these fields add no subject facts. |
-| Access program setting | `access_programs.cyber: standard`. | No relevance to the question. |
+| Name | What was sent | Useful or necessary for this answer? | Est. tokens (% of request) |
+|---|---|---|---:|
+| Tool definitions | 14 tool schemas, including embedded documentation for web search, shell commands, and image generation. | Web search could verify uncertain or current facts. The other tools had no clear use. | 11,449 (45.11%) |
+| Base Codex instructions | Writing style, formatting, approvals, and coding workflows. | Could shape the wording. Your question already specified the length and tone. | 4,371 (17.22%) |
+| Skills, connectors, and plugins | Installed skill catalog, deferred tool namespaces, and recommended plugins. | No clear use for two short definitions. | 3,103 (12.23%) |
+| Desktop app instructions | Rules for files, media, worktrees, automations, chats, and app formatting. | No clear use for a plain-text answer. | 2,596 (10.23%) |
+| Cache, client, and message metadata | Cache key, IDs, timestamps, client flags, message roles, and provenance. | Roles identify your question. The remaining fields mainly support request handling. | 1,958 (7.72%) |
+| Permissions and collaboration | Filesystem and network permissions, approval policy, collaboration mode, and subagent rules. | Governs available actions. The definitions didn’t require workspace access or delegation. | 876 (3.45%) |
+| Open and selected Page context | Page snapshots and instructions for interpreting them. Both Page IDs were null. | No Page content to use. | 479 (1.89%) |
+| Workspace instructions and environment | Your `@@@` editing rule, working directory, shell, and workspace roots. | Unnecessary for a question that didn’t involve files or commands. | 332 (1.31%) |
+| Client date and time zone | Client date, `Asia/Jerusalem`, and scheduling guidance. | Unnecessary for the question as asked. | 76 (0.30%) |
+| Request and response controls | Request type, streaming, storage flag, summary delivery, and requested encrypted output fields. | Relevant to processing and delivery. | 42 (0.17%) |
+| Reasoning settings | Top-level `xhigh` effort, summary and context settings, plus an appended `low` effort update. | Could affect generation. The trace doesn’t establish which effort took effect. | 37 (0.15%) |
+| **Your question** | The request for one terse paragraph each on Aerospike and Akka. | Essential. It specifies the subjects and the format. | **21 (0.08%)** |
+| Model and verbosity | `gpt-6.1-sol` and low text verbosity. | Selects the model and reinforces “be terse.” | 17 (0.07%) |
+| Tool-use settings | Automatic tool selection and parallel calls disabled. | Relevant if a tool was called. The snapshot doesn’t show whether one was. | 12 (0.05%) |
+| Access program setting | `access_programs.cyber: standard`. | No relevance to the definitions. | 10 (0.04%) |
